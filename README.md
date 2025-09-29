@@ -7,8 +7,8 @@
 
 ### 拉取与进入目录
 ```bash
-git clone https://github.com/vonssy/Providence-BOT.git
-cd Providence-BOT
+git clone https://github.com/sdohuajia/Providence-game.git
+cd Providence-game
 ```
 
 ### 安装依赖
