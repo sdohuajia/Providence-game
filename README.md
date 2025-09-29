@@ -1,4 +1,4 @@
-## Providence-Bot（Node.js 版）
+## Providence-Bot
 
 简洁说明：本工具用于自动签到与每日任务，多账号支持，支持代理（可选）。
 
