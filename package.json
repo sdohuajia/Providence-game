@@ -1,0 +1,23 @@
+{
+  "name": "providence-bot-main",
+  "version": "1.0.0",
+  "description": "> Automated daily completion and multi-account management",
+  "type": "module",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "test": "node -e \"console.log('ok')\""
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.12.2",
+    "chalk": "^5.6.2",
+    "https-proxy-agent": "^7.0.6",
+    "inquirer": "^9.3.8",
+    "node-fetch": "^3.3.2",
+    "proxy-agent": "^6.5.0",
+    "socks-proxy-agent": "^8.0.5"
+  }
+}
