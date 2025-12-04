@@ -1,418 +1,318 @@
-import fs from 'fs';
-import readline from 'readline';
-import chalk from 'chalk';
-import axios from 'axios';
-import inquirer from 'inquirer';
-import { HttpsProxyAgent } from 'https-proxy-agent';
-import { SocksProxyAgent } from 'socks-proxy-agent';
-import ProxyAgent from 'proxy-agent';
+#!/usr/bin/env node
+/**
+ * Providence 全自动打卡 + 任务机器人
+ * 
+ * 极简干净版 | 无水印 | 无询问 | 有代理用代理，没代理自动直连
+ * 
+ * 2025.12 最新可用 - JavaScript 版本
+ */
 
-const BASE_API = 'https://hub.playprovidence.io/api';
+const axios = require('axios');
+const chalk = require('chalk');
+const fs = require('fs').promises;
+const path = require('path');
+const { HttpsProxyAgent } = require('https-proxy-agent');
+const { SocksProxyAgent } = require('socks-proxy-agent');
 
-function setConsoleTitle(title) {
-  if (process.platform === 'win32') {
-    process.title = title;
-    process.stdout.write(`\x1b]0;${title}\x07`);
-  } else {
-    process.title = title;
-  }
+// 生成随机 User-Agent
+function getRandomUserAgent() {
+    const userAgents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2.1 Safari/605.1.15'
+    ];
+    return userAgents[Math.floor(Math.random() * userAgents.length)];
 }
 
-function clearTerminal() {
-  process.stdout.write(process.platform === 'win32' ? '\x1Bc' : '\x1b[2J\x1b[3J\x1b[H');
-}
-
-function formatBeijing(date) {
-  const formatter = new Intl.DateTimeFormat('zh-CN', {
-    timeZone: 'Asia/Shanghai',
-    year: 'numeric', month: 'numeric', day: 'numeric',
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
-  });
-  const parts = formatter.formatToParts(date);
-  const map = Object.fromEntries(parts.map(p => [p.type, p.value]));
-  const y = map.year;
-  const m = String(Number(map.month));
-  const d = String(Number(map.day));
-  const hh = map.hour.padStart(2, '0');
-  const mm = map.minute.padStart(2, '0');
-  const ss = map.second.padStart(2, '0');
-  return `${y}/${m}/${d}, ${hh}:${mm}:${ss}`;
-}
-
-function nowStr() {
-  return formatBeijing(new Date());
-}
-
-function log(message) {
-  console.log(
-    `${chalk.cyanBright(`[ ${nowStr()} ]`)}${chalk.whiteBright(' | ')}${message}`
-  );
-}
-
-function welcome() {
-  console.log(`\n${chalk.greenBright('Providence')} ${chalk.blueBright('自动 BOT')}\n`);
-}
-
-function formatSeconds(totalSeconds) {
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = Math.floor(totalSeconds % 60);
-  return `${String(hours).padStart(2,'0')}:${String(minutes).padStart(2,'0')}:${String(seconds).padStart(2,'0')}`;
-}
-
-function ensureProtocol(proxy) {
-  if (!proxy) return null;
-  const schemes = ['http://', 'https://', 'socks4://', 'socks5://'];
-  if (schemes.some(s => proxy.startsWith(s))) return proxy;
-  return `http://${proxy}`;
-}
-
-function buildAxiosConfigForProxy(proxy) {
-  if (!proxy) return { httpAgent: undefined, httpsAgent: undefined, headers: {} };
-
-  const url = ensureProtocol(proxy);
-  if (url.startsWith('socks4://') || url.startsWith('socks5://')) {
-    const agent = new SocksProxyAgent(url);
-    return { httpAgent: agent, httpsAgent: agent, headers: {} };
-  }
-
-  if (url.startsWith('http://') || url.startsWith('https://')) {
-    // Extract possible auth in http://user:pass@host:port
-    const match = url.match(/^http:\/\/(.*?):(.*?)@(.*)$/);
-    if (match) {
-      const [, username, password, hostPort] = match;
-      const clean = `http://${hostPort}`;
-      const agent = new HttpsProxyAgent(clean);
-      const authHeader = 'Basic ' + Buffer.from(`${username}:${password}`).toString('base64');
-      return { httpAgent: agent, httpsAgent: agent, headers: { 'Proxy-Authorization': authHeader } };
+class Providence {
+    constructor() {
+        this.api = 'https://hub.playprovidence.io/api';
+        this.headers = {};
+        this.cookies = {};
+        this.proxies = [];
+        this.proxyIndex = 0;
+        this.accountProxy = {};
     }
-    const agent = new HttpsProxyAgent(url);
-    return { httpAgent: agent, httpsAgent: agent, headers: {} };
-  }
 
-  return { httpAgent: undefined, httpsAgent: undefined, headers: {} };
-}
-
-async function checkConnection(proxy) {
-  try {
-    const { httpAgent, httpsAgent, headers } = buildAxiosConfigForProxy(proxy);
-    await axios.get('https://api.ipify.org?format=json', { httpAgent, httpsAgent, headers, timeout: 30000 });
-    return true;
-  } catch (e) {
-    log(`${chalk.cyanBright('状态   :')}${chalk.redBright(' 连接非 200 OK ')}${chalk.magentaBright('-')}${chalk.yellowBright(` ${e.message} `)}`);
-    return false;
-  }
-}
-
-async function userStats(token, proxy) {
-  const url = `${BASE_API}/user/stats`;
-  const { httpAgent, httpsAgent, headers } = buildAxiosConfigForProxy(proxy);
-  try {
-    const res = await axios.get(url, {
-      httpAgent, httpsAgent, headers,
-      timeout: 60000,
-      headers: {
-        ...headers,
-        'Accept': '*/*',
-        'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Origin': 'https://hub.playprovidence.io',
-        'Referer': 'https://hub.playprovidence.io/',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-origin',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Cookie': `__Secure-authjs.session-token=${token}`
-      }
-    });
-    return res.data;
-  } catch (e) {
-    throw e;
-  }
-}
-
-async function checkinStatus(token, proxy) {
-  const url = `${BASE_API}/daily-checkin/status`;
-  const { httpAgent, httpsAgent, headers } = buildAxiosConfigForProxy(proxy);
-  const res = await axios.get(url, {
-    httpAgent, httpsAgent, headers,
-    timeout: 60000,
-    headers: {
-      ...headers,
-      'Accept': '*/*',
-      'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-      'Origin': 'https://hub.playprovidence.io',
-      'Referer': 'https://hub.playprovidence.io/',
-      'Sec-Fetch-Dest': 'empty',
-      'Sec-Fetch-Mode': 'cors',
-      'Sec-Fetch-Site': 'same-origin',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Cookie': `__Secure-authjs.session-token=${token}`
+    clearScreen() {
+        process.stdout.write('\x1B[2J\x1B[0f');
     }
-  });
-  return res.data;
-}
 
-async function claimCheckin(token, proxy) {
-  const url = `${BASE_API}/daily-checkin/checkin`;
-  const { httpAgent, httpsAgent, headers } = buildAxiosConfigForProxy(proxy);
-  const res = await axios.post(url, undefined, {
-    httpAgent, httpsAgent, headers,
-    timeout: 60000,
-    headers: {
-      ...headers,
-      'Accept': '*/*',
-      'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-      'Origin': 'https://hub.playprovidence.io',
-      'Referer': 'https://hub.playprovidence.io/',
-      'Sec-Fetch-Dest': 'empty',
-      'Sec-Fetch-Mode': 'cors',
-      'Sec-Fetch-Site': 'same-origin',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Content-Length': '0',
-      'Cookie': `__Secure-authjs.session-token=${token}`
+    log(msg) {
+        const now = new Date();
+        const wib = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Jakarta' }));
+        const t = wib.toISOString().replace('T', ' ').substring(0, 19);
+        console.log(`${chalk.cyan(`[${t}]`)} ${msg}`);
     }
-  });
-  return res.data;
-}
 
-async function dailyTasks(token, proxy) {
-  const url = `${BASE_API}/quests/daily-link/today`;
-  const { httpAgent, httpsAgent, headers } = buildAxiosConfigForProxy(proxy);
-  const res = await axios.get(url, {
-    httpAgent, httpsAgent, headers,
-    timeout: 60000,
-    headers: {
-      ...headers,
-      'Accept': '*/*',
-      'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-      'Origin': 'https://hub.playprovidence.io',
-      'Referer': 'https://hub.playprovidence.io/',
-      'Sec-Fetch-Dest': 'empty',
-      'Sec-Fetch-Mode': 'cors',
-      'Sec-Fetch-Site': 'same-origin',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Cookie': `__Secure-authjs.session-token=${token}`
+    banner() {
+        this.clearScreen();
+        console.log(
+            chalk.green.bold(
+                '██████╗ ██████╗  ██████╗ ██╗   ██╗██╗██████╗ ███████╗███╗   ██╗ ██████╗███████╗\n' +
+                '██╔══██╗██╔══██╗██╔═══██╗██║   ██║██║██╔══██╗██╔════╝████╗  ██║██╔════╝██╔════╝\n' +
+                '██████╔╝██████╔╝██║   ██║██║   ██║██║██║  ██║█████╗  ██╔██╗ ██║██║     █████╗  \n' +
+                '██╔═══╝ ██╔══██╗██║   ██║╚██╗ ██╔╝██║██║  ██║██╔══╝  ██║╚██╗██║██║     ██╔══╝  \n' +
+                '██║     ██║  ██║╚██████╔╝ ╚████╔╝ ██║██████╔╝███████╗██║ ╚████║╚██████╗███████╗\n' +
+                '╚═╝     ╚═╝  ╚═╝ ╚═════╝   ╚═══╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝ ╚═════╝╚══════╝\n'
+            ) +
+            chalk.white.bold('               全自动每日打卡 + 任务完成机器人 · 2025.12 稳定版\n') +
+            chalk.reset()
+        );
     }
-  });
-  return res.data;
-}
 
-async function completeTask(token, questId, questName, proxy) {
-  const url = `${BASE_API}/quests/daily-link/complete`;
-  const { httpAgent, httpsAgent, headers } = buildAxiosConfigForProxy(proxy);
-  const body = { questId };
-  const res = await axios.post(url, body, {
-    httpAgent, httpsAgent, headers,
-    timeout: 60000,
-    headers: {
-      ...headers,
-      'Accept': '*/*',
-      'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-      'Origin': 'https://hub.playprovidence.io',
-      'Referer': 'https://hub.playprovidence.io/',
-      'Sec-Fetch-Dest': 'empty',
-      'Sec-Fetch-Mode': 'cors',
-      'Sec-Fetch-Site': 'same-origin',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Content-Type': 'application/json',
-      'Cookie': `__Secure-authjs.session-token=${token}`
+    formatTime(seconds) {
+        const h = Math.floor(seconds / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        const s = seconds % 60;
+        return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
     }
-  });
-  return res.data;
-}
 
-async function askRuntimeOptions() {
-  const answers = await inquirer.prompt([
-    {
-      type: 'list',
-      name: 'proxyChoice',
-      message: '选择运行模式',
-      choices: [
-        { name: '1. 使用代理运行', value: 1 },
-        { name: '2. 不使用代理运行', value: 2 }
-      ]
-    }
-  ]);
-  return { proxyChoice: answers.proxyChoice, rotateProxy: false };
-}
-
-function loadTokens() {
-  if (!fs.existsSync('tokens.txt')) throw new Error("未找到文件 'tokens.txt'");
-  return fs.readFileSync('tokens.txt', 'utf8').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-}
-
-function loadProxies() {
-  const filename = 'proxy.txt';
-  if (!fs.existsSync(filename)) {
-    log(chalk.redBright(`未找到文件 ${filename}`));
-    return [];
-  }
-  const list = fs.readFileSync(filename, 'utf8').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-  if (!list.length) {
-    log(chalk.redBright('未找到任何代理。'));
-  } else {
-    log(`${chalk.greenBright('代理总数      : ')}${chalk.whiteBright(list.length)}`);
-  }
-  return list;
-}
-
-function makeAccountProxyRotator(proxies) {
-  let index = 0;
-  const accountToProxy = new Map();
-  function nextFor(account) {
-    if (!proxies.length) return null;
-    if (!accountToProxy.has(account)) {
-      accountToProxy.set(account, ensureProtocol(proxies[index]));
-      index = (index + 1) % proxies.length;
-    }
-    return accountToProxy.get(account);
-  }
-  function rotate(account) {
-    if (!proxies.length) return null;
-    const p = ensureProtocol(proxies[index]);
-    accountToProxy.set(account, p);
-    index = (index + 1) % proxies.length;
-    return p;
-  }
-  return { nextFor, rotate };
-}
-
-async function processCheckConnection(token, useProxy, rotateProxy, rotator) {
-  while (true) {
-    const proxy = useProxy ? rotator.nextFor(token) : null;
-    log(`${chalk.cyanBright('代理   :')}${chalk.whiteBright(` ${proxy} `)}`);
-    const valid = await checkConnection(proxy);
-    if (!valid) {
-      if (rotateProxy && useProxy) rotator.rotate(token);
-      continue;
-    }
-    return true;
-  }
-}
-
-async function processAccount(token, useProxy, rotateProxy, rotator) {
-  const ok = await processCheckConnection(token, useProxy, rotateProxy, rotator);
-  if (!ok) return;
-  const proxy = useProxy ? rotator.nextFor(token) : null;
-
-  try {
-    const stats = await userStats(token, proxy);
-    if (stats) {
-      const email = stats?.data?.user_email ?? '未知';
-      const level = stats?.data?.level ?? 0;
-      const points = stats?.data?.total_xp ?? 0;
-      log(`${chalk.cyanBright('账号   :')}${chalk.whiteBright(` ${maskAccount(email)} `)}`);
-      log(`${chalk.cyanBright('等级   :')}${chalk.whiteBright(` ${level} `)}`);
-      log(`${chalk.cyanBright('积分   :')}${chalk.whiteBright(` ${points} XP `)}`);
-    }
-  } catch (e) {
-    log(`${chalk.cyanBright('账号   :')}${chalk.redBright(' 获取数据失败 ')}${chalk.magentaBright('-')}${chalk.yellowBright(` ${e.message} `)}`);
-  }
-
-  try {
-    const status = await checkinStatus(token, proxy);
-    const canCheckin = status?.data?.canCheckinToday;
-    if (canCheckin) {
-      try {
-        const claim = await claimCheckin(token, proxy);
-        const reward = claim?.data?.xpEarned;
-        log(`${chalk.cyanBright('签到   :')}${chalk.greenBright(' 领取成功 ')}${chalk.magentaBright('-')}${chalk.cyanBright(' 奖励: ')}${chalk.whiteBright(`${reward} XP`)}`);
-      } catch (e) {
-        log(`${chalk.cyanBright('签到   :')}${chalk.redBright(' 未领取 ')}${chalk.magentaBright('-')}${chalk.yellowBright(` ${e.message} `)}`);
-      }
-    } else {
-      const nextMs = status?.data?.nextCheckinIn;
-      if (typeof nextMs === 'number') {
-        const nextDate = new Date(Date.now() + nextMs);
-        const fmt = formatBeijing(nextDate);
-        log(`${chalk.cyanBright('签到   :')}${chalk.yellowBright(' 还未到领取时间 ')}${chalk.magentaBright('-')}${chalk.cyanBright(' 预计时间: ')}${chalk.whiteBright(`${fmt}`)}`);
-      }
-    }
-  } catch (e) {
-    log(`${chalk.cyanBright('签到   :')}${chalk.redBright(' 获取状态失败 ')}${chalk.magentaBright('-')}${chalk.yellowBright(` ${e.message} `)}`);
-  }
-
-  try {
-    const list = await dailyTasks(token, proxy);
-    const quests = Array.isArray(list?.data) ? list.data : [];
-    if (quests.length) {
-      log(`${chalk.cyanBright('任务   :')}`);
-      for (const q of quests) {
-        const questId = q.id;
-        const questName = q.title;
-        const questXp = q.xp;
-        const isCompleted = q.isCompleted;
-        if (isCompleted) {
-          log(`${chalk.cyanBright('   > ')}${chalk.whiteBright(questName)}${chalk.yellowBright(' 已完成 ')}`);
-          continue;
-        }
+    async loadProxies() {
         try {
-          await completeTask(token, questId, questName, proxy);
-          log(`${chalk.cyanBright('   > ')}${chalk.whiteBright(questName)}${chalk.greenBright(' 完成 ')}${chalk.magentaBright('-')}${chalk.cyanBright(' 奖励: ')}${chalk.whiteBright(` ${questXp} XP `)}`);
-        } catch (e) {
-          log(`${chalk.cyanBright('   > ')}${chalk.whiteBright(questName)}${chalk.redBright(' 未完成 ')}${chalk.magentaBright('-')}${chalk.yellowBright(` ${e.message} `)}`);
+            await fs.access('proxy.txt');
+        } catch {
+            this.log(chalk.yellow('未检测到 proxy.txt → 使用直连模式'));
+            return;
         }
-      }
-    } else {
-      log(`${chalk.cyanBright('任务   :')}${chalk.yellowBright(' 没有可用的每日任务 ')}`);
-    }
-  } catch (e) {
-    log(`${chalk.cyanBright('任务   :')}${chalk.redBright(' 获取每日任务失败 ')}${chalk.magentaBright('-')}${chalk.yellowBright(` ${e.message} `)}`);
-  }
-}
 
-function maskAccount(email) {
-  if (!email || !email.includes('@')) return email || '未知';
-  const [local, domain] = email.split('@');
-  const masked = local.slice(0, 3) + '*'.repeat(3) + local.slice(-3);
-  return `${masked}@${domain}`;
-}
+        const content = await fs.readFile('proxy.txt', 'utf-8');
+        const lines = content
+            .split('\n')
+            .map(line => line.trim())
+            .filter(line => line && !line.startsWith('#'));
 
-async function main() {
-  setConsoleTitle('Providence-Bot');
-  const tokens = loadTokens();
-  const { proxyChoice, rotateProxy } = await askRuntimeOptions();
+        if (lines.length === 0) {
+            this.log(chalk.yellow('proxy.txt 为空 → 使用直连模式'));
+            return;
+        }
 
-  while (true) {
-    clearTerminal();
-    welcome();
-  log(`${chalk.greenBright('账号总数      : ')}${chalk.whiteBright(tokens.length)}`);
+        this.proxies = lines.map(p => {
+            if (!p.startsWith('http') && !p.startsWith('socks')) {
+                return 'http://' + p;
+            }
+            return p;
+        });
 
-    const useProxy = proxyChoice === 1;
-    const proxies = useProxy ? loadProxies() : [];
-    const rotator = makeAccountProxyRotator(proxies);
-
-    const separator = '='.repeat(26);
-    for (let i = 0; i < tokens.length; i++) {
-      const token = tokens[i];
-      if (!token) continue;
-      log(`${chalk.cyanBright(separator + '[')}${chalk.whiteBright(` ${i + 1} `)}${chalk.cyanBright('共')}${chalk.whiteBright(` ${tokens.length} `)}${chalk.cyanBright(']' + separator)}`);
-      await processAccount(token, useProxy, rotateProxy, rotator);
-      await new Promise(r => setTimeout(r, 3000));
+        this.log(chalk.green(`成功加载 ${this.proxies.length} 个代理`));
     }
 
-    log(chalk.cyanBright('='.repeat(63)));
-    let seconds = 12 * 60 * 60;
-    while (seconds > 0) {
-      const formatted = formatSeconds(seconds);
-      const line = `${chalk.cyanBright('[ 等待')}${chalk.whiteBright(` ${formatted} `)}${chalk.cyanBright('... ]')}${chalk.whiteBright(' | ')}${chalk.blueBright('所有账号已处理完成。')}`;
-      process.stdout.write(`${line}\r`);
-      await new Promise(r => setTimeout(r, 1000));
-      seconds -= 1;
+    getProxy(token) {
+        if (this.proxies.length === 0) {
+            return null;
+        }
+
+        if (!this.accountProxy[token]) {
+            const proxy = this.proxies[this.proxyIndex];
+            this.accountProxy[token] = proxy;
+            this.proxyIndex = (this.proxyIndex + 1) % this.proxies.length;
+        }
+
+        return this.accountProxy[token];
     }
-  }
+
+    hideEmail(email) {
+        if (!email || !email.includes('@')) {
+            return '未知邮箱';
+        }
+
+        const [local, domain] = email.split('@', 2);
+        return `${local.substring(0, 3)}***${local.substring(local.length - 2)}@${domain}`;
+    }
+
+    async request(method, url, token, data = null, proxy = null) {
+        const headers = {
+            'Accept': '*/*',
+            'Accept-Language': 'zh-CN,zh;q=0.9',
+            'Origin': 'https://hub.playprovidence.io',
+            'Referer': 'https://hub.playprovidence.io/',
+            'User-Agent': getRandomUserAgent(),
+        };
+
+        if (data) {
+            headers['Content-Type'] = 'application/json';
+        }
+
+        const config = {
+            method,
+            url,
+            headers: {
+                ...headers,
+                'Cookie': `__Secure-authjs.session-token=${token.trim()}`
+            },
+            timeout: 60000,
+        };
+
+        if (data) {
+            config.data = typeof data === 'string' ? data : JSON.stringify(data);
+        }
+
+        // 配置代理
+        if (proxy) {
+            if (proxy.startsWith('socks')) {
+                // SOCKS 代理需要使用 agent
+                const agent = new SocksProxyAgent(proxy);
+                config.httpsAgent = agent;
+                config.httpAgent = agent;
+            } else {
+                // HTTP/HTTPS 代理可以直接使用 URL
+                config.proxy = false; // 禁用默认代理
+                const agent = new HttpsProxyAgent(proxy);
+                config.httpsAgent = agent;
+                config.httpAgent = agent;
+            }
+        }
+
+        try {
+            const response = await axios(config);
+            if (response.data) {
+                return response.data;
+            }
+        } catch (error) {
+            // 静默处理错误
+        }
+
+        return null;
+    }
+
+    async processAccount(token) {
+        const proxy = this.getProxy(token);
+
+        // 获取用户信息
+        const info = await this.request('GET', `${this.api}/user/stats`, token, null, proxy);
+        if (!info || !info.data) {
+            this.log(chalk.red('✗ 账号失效或网络错误'));
+            return;
+        }
+
+        const user = info.data;
+        this.log(
+            chalk.cyan(
+                `账号: ${this.hideEmail(user.user_email || '未知')} | 等级 ${user.level || 0} | 总经验 ${user.total_xp || 0} XP`
+            )
+        );
+
+        // 每日打卡
+        const status = await this.request('GET', `${this.api}/daily-checkin/status`, token, null, proxy);
+        if (status && status.data && status.data.canCheckinToday) {
+            const result = await this.request('POST', `${this.api}/daily-checkin/checkin`, token, null, proxy);
+            if (result && result.success) {
+                const xp = result.data.xpEarned;
+                this.log(chalk.green(`✓ 每日打卡成功 +${xp} XP`));
+            } else {
+                this.log(chalk.red('✗ 打卡失败'));
+            }
+        } else {
+            this.log(chalk.yellow('今日已打卡'));
+        }
+
+        // 每日任务
+        const tasks = await this.request('GET', `${this.api}/quests/daily-link/today`, token, null, proxy);
+        if (tasks && tasks.data) {
+            const total = tasks.data.length;
+            const completed = tasks.data.filter(t => t.isCompleted).length;
+            this.log(`发现 ${total} 个日常任务（${completed} 个已完成）`);
+
+            for (const task of tasks.data) {
+                if (task.isCompleted) {
+                    continue;
+                }
+
+                const result = await this.request(
+                    'POST',
+                    `${this.api}/quests/daily-link/complete`,
+                    token,
+                    JSON.stringify({ questId: task.id }),
+                    proxy
+                );
+
+                if (result && result.success) {
+                    this.log(chalk.green(`   ✓ ${task.title} +${task.xp} XP`));
+                } else {
+                    this.log(chalk.red(`   ✗ ${task.title} 完成失败`));
+                }
+
+                await new Promise(resolve => setTimeout(resolve, 1500));
+            }
+        } else {
+            this.log(chalk.cyan('暂无日常任务'));
+        }
+    }
+
+    async run() {
+        this.banner();
+
+        let tokens = [];
+        try {
+            await fs.access('tokens.txt');
+            const content = await fs.readFile('tokens.txt', 'utf-8');
+            tokens = content
+                .split('\n')
+                .map(line => line.trim())
+                .filter(line => line);
+        } catch {
+            this.log(chalk.red('错误：未找到 tokens.txt 文件'));
+            process.stdin.setRawMode(true);
+            process.stdin.resume();
+            process.stdin.on('data', () => {
+                process.exit(0);
+            });
+            return;
+        }
+
+        if (tokens.length === 0) {
+            this.log(chalk.red('tokens.txt 为空'));
+            return;
+        }
+
+        this.log(`共加载 ${tokens.length} 个账号`);
+        await this.loadProxies();
+
+        const processCycle = async () => {
+            this.banner();
+            this.log(`开始处理 ${tokens.length} 个账号`);
+
+            for (let i = 0; i < tokens.length; i++) {
+                const token = tokens[i];
+                this.log(`${'─'.repeat(20)} 第 ${i + 1}/${tokens.length} 个账号 ${'─'.repeat(20)}`);
+                await this.processAccount(token);
+                await new Promise(resolve => setTimeout(resolve, 3000));
+            }
+
+            this.log(chalk.green.bold('本轮全部完成，进入 12 小时等待周期'));
+
+            let remaining = 12 * 3600;
+            while (remaining > 0) {
+                process.stdout.write(`\r${chalk.cyan(`下一轮倒计时：${this.formatTime(remaining)}     `)}`);
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                remaining--;
+            }
+            console.log(''); // 换行
+
+            // 继续下一轮
+            processCycle();
+        };
+
+        processCycle();
+    }
 }
 
-process.on('SIGINT', () => {
-  console.log(
-    `${chalk.cyanBright(`[ ${nowStr()} ]`)}${chalk.whiteBright(' | ')}${chalk.redBright('[ 退出 ] Providence - BOT')}   `
-  );
-  process.exit(0);
-});
+// 主程序入口
+if (require.main === module) {
+    const bot = new Providence();
+    bot.run().catch(error => {
+        console.error(chalk.red('运行出错:'), error);
+        process.exit(1);
+    });
 
-main().catch((e) => {
-  log(chalk.redBright(`错误: ${e.message}`));
-  process.exit(1);
-});
+    // 处理 Ctrl+C
+    process.on('SIGINT', () => {
+        console.log(`\n${chalk.red('已手动停止脚本')}`);
+        process.exit(0);
+    });
+}
 
+module.exports = Providence;
 
