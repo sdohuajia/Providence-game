@@ -1,23 +1,23 @@
 {
-  "name": "providence-bot-main",
+  "name": "providence-bot",
   "version": "1.0.0",
-  "description": "> Automated daily completion and multi-account management",
-  "type": "module",
-  "main": "bot.js",
+  "description": "Providence 全自动打卡 + 任务机器人 - JavaScript 版本",
+  "main": "providence.js",
   "scripts": {
-    "start": "node bot.js",
-    "test": "node -e \"console.log('ok')\""
+    "start": "node providence.js"
   },
-  "keywords": [],
+  "keywords": [
+    "providence",
+    "bot",
+    "automation"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "axios": "^1.12.2",
-    "chalk": "^5.6.2",
-    "https-proxy-agent": "^7.0.6",
-    "inquirer": "^9.3.8",
-    "node-fetch": "^3.3.2",
-    "proxy-agent": "^6.5.0",
-    "socks-proxy-agent": "^8.0.5"
+    "axios": "^1.6.0",
+    "chalk": "^4.1.2",
+    "https-proxy-agent": "^7.0.2",
+    "socks-proxy-agent": "^8.0.2"
   }
 }
+
